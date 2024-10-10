@@ -3,8 +3,6 @@ import pandas as pd
 import numpy as np
 from vnstock3 import Vnstock
 from datetime import datetime, timedelta
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 
 # Cache cho những thao tác tốn kém tài nguyên hoặc gọi API
 @st.cache_data
@@ -13,15 +11,6 @@ def get_stock_data(ck):
     company = Vnstock().stock(symbol=ck, source='TCBS').company
     return stock, company
 
-@st.cache_data
-def get_google_sheet_data(sheet_id, credentials_file):
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(credentials_file, scope)
-    client = gspread.authorize(creds)
-    sheet = client.open_by_key(sheet_id)
-    worksheet = sheet.get_worksheet(0)
-    ha = worksheet.get_all_records()
-    return pd.DataFrame(ha)
 
 def calculate_indicators(stock, ck):
     today = datetime.today()
@@ -29,8 +18,13 @@ def calculate_indicators(stock, ck):
     start = today - timedelta(days=30)
     
     # Tính khối lượng trung bình 15 ngày
-    val = stock.quote.history(start=str(start.date()), end=str(yesterday.date()))
-    vol_ave = val['volume'].iloc[7:]
+    val = stock.quote.history(symbol=ck,start=str(start.date()), end=str(yesterday.date()))
+    vol_ave = val['volume'].iloc[7:].mean()
+
+    # Tính biến động giá
+    current = stock.quote.intraday(symbol=ck, show_log=False).iloc[-1,1]
+    lag = stock.quote.history(symbol=ck,start=str(start.date()), end=str(yesterday.date())).iloc[-1,4]*1000
+    change = (current - lag)/(lag)*100
 
     # Tính RSI
     val['diff'] = val['close'].diff()
@@ -48,7 +42,7 @@ def calculate_indicators(stock, ck):
     # Lợi nhuận thuần
     rev = stock.finance.income_statement(period='quarter', lang='vi')['Lợi nhuận thuần'].iloc[0]
 
-    return vol_ave.mean(), rsi, roe, roa, rev
+    return vol_ave, current, change, rsi, roe, roa, rev
 
 # Tải logo và thông tin cố định
 st.image('logo.jpg', width=200)
@@ -66,27 +60,20 @@ with col1:
 
 # Nhập mã chứng khoán
 ck = st.text_input('Mã CK', value='ACB').upper()
+st.info('Vui lòng nhấn enter sau khi nhập mã!')
 
 
 # Lấy dữ liệu từ API và tính toán
 stock, company = get_stock_data(ck)
-vol_ave, rsi, roe, roa, rev = calculate_indicators(stock, ck)
+vol_ave, current, change, rsi, roe, roa, rev = calculate_indicators(stock, ck)
 
 # Tra cứu từ Google Sheet
 ggs = pd.read_csv('Cau_truyen.csv')
 danh_gia = ggs['Đánh giá'][ggs['Cổ Phiếu'] == ck]
 
 # Dữ liệu Google Sheet (tải một lần)
-ha = get_google_sheet_data('1J0KVvPJuyWM2SSUPL4LZcaN2wSwQRJIuw00yjwNUdMk', 'cre.json')
-mck = ha[ha.iloc[:, 0] == ck]
-
-#Tính biến động giá
-today = datetime.today()
-yesterday = today - timedelta(days=1)
-start = today - timedelta(days=30)
-current = stock.quote.intraday(symbol=ck, show_log=False).iloc[-1,1]
-lag = stock.quote.history(start=str(start.date()), end=str(yesterday.date())).iloc[-1,4]*1000
-change = (current - lag)/(lag)*100
+ha = pd.read_csv('Ha.csv')
+ha = pd.DataFrame(ha)
 
 # Hiển thị thông tin
 st.markdown(f'<span style="color:green; font-weight:bold;">{company.profile()["company_name"].iloc[0]}</span>', unsafe_allow_html=True)
@@ -107,14 +94,15 @@ if box == 'Thông tin cơ bản':
     st.write('Lợi nhuận thuần(Q) : ', rev, 'vnđ')
 
 elif box == 'Chu trình kinh doanh':
-    if str(ck) in mck.iloc[:,0]:
+    if str(ck) in ha.iloc[:,0].values:
+        mck = ha[ha.iloc[:,0] == str(ck)]
         for i in mck.columns[[1, 3, 4, 5, 6, 7]]:
             st.write(f'⁃ **{i}** : ')
             text = mck[i].iloc[0]  # Lấy giá trị từ hàng đầu tiên
             st.text(f'     {text}')
     else:
         st.write('Không có dữ liệu')
-
+    
 elif box == 'Ban lãnh đạo':
     st.write(company.officers())
 
